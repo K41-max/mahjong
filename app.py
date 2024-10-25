@@ -1,135 +1,201 @@
 import string
 import random
-from flask import Flask, render_template, request
-from flask_socketio import SocketIO, emit, join_room, leave_room, rooms
-import eventlet
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from socketio import ASGIApp, AsyncServer
+from starlette.middleware.sessions import SessionMiddleware
+
 from models import Game, Room, Player
 from threading import Lock
 
-eventlet.monkey_patch()
+# Socket.IOサーバーの初期化
+sio = AsyncServer(async_mode='asgi')
+app = FastAPI()
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, async_mode='eventlet')
-thread = None
-thread_lock = Lock()
+# セッションミドルウェアの追加（必要に応じて）
+app.add_middleware(SessionMiddleware, secret_key='secret!')
+
+# Socket.IOアプリをASGIアプリとして統合
+sio_app = ASGIApp(sio, other_asgi_app=app)
+
+# 静的ファイルとテンプレートの設定
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+from fastapi.templating import Jinja2Templates
+
+templates = Jinja2Templates(directory="templates")
 
 # グローバルに部屋を管理する辞書
 rooms_dict = {}
+lock = Lock()
 
 def generate_room_code(length=6):
     """ランダムな部屋コードを生成"""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+@app.get("/", response_class=HTMLResponse)
+async def get_index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
-@socketio.on('create_room')
-def handle_create_room(data):
+# Socket.IOイベントハンドラー
+
+@sio.event
+async def connect(sid, environ):
+    print(f"Client connected: {sid}")
+    await sio.emit('game_state', {'message': 'Connected'}, room=sid)
+
+@sio.event
+async def disconnect(sid):
+    print(f"Client disconnected: {sid}")
+    # プレイヤーの削除や他のクリーンアップ処理をここに追加可能
+
+@sio.event
+async def create_room(sid, data):
     player_name = data.get('player_name')
-    room_code = generate_room_code()
-    new_room = Room(room_code)
-    rooms_dict[room_code] = new_room
-    player = Player(request.sid, player_name)
-    new_room.add_player(player)
-    join_room(room_code)
-    emit('room_created', {'room_code': room_code}, room=request.sid)
+    if not player_name:
+        await sio.emit('error', {'message': 'Player name is required'}, room=sid)
+        return
 
-@socketio.on('join_room')
-def handle_join_room(data):
+    room_code = generate_room_code()
+    with lock:
+        new_room = Room(room_code)
+        rooms_dict[room_code] = new_room
+
+    player = Player(sid, player_name)
+    await sio.emit('room_created', {'room_code': room_code}, room=sid)
+
+    # プレイヤーを部屋に追加
+    async with sio.session(sid):
+        new_room.add_player(player)
+        sio.enter_room(sid, room_code)
+        await sio.emit('room_joined', {'room_code': room_code}, room=room_code)
+
+        # 4人揃ったらゲーム開始
+        if new_room.is_full():
+            new_room.start_game()
+            await sio.emit('game_started', room=room_code)
+            current_player = new_room.game.get_current_player()
+            await sio.emit('turn', {'player_id': current_player.sid}, room=room_code)
+            await start_turn_timer(room_code, current_player.sid)
+
+@sio.event
+async def join_room_event(sid, data):
     room_code = data.get('room_code')
     player_name = data.get('player_name')
-    room = rooms_dict.get(room_code)
-    if room and not room.is_full():
-        player = Player(request.sid, player_name)
-        room.add_player(player)
-        join_room(room_code)
-        emit('room_joined', {'room_code': room_code}, room=request.sid)
-        # 全員が揃ったらゲームを開始
-        if room.is_full():
-            room.start_game()
-            socketio.emit('game_started', room=room_code)
-            # 開始時に最初のプレイヤーのターンを設定
-            current_player = room.game.get_current_player()
-            socketio.emit('turn', {'player_id': current_player.sid}, room=room_code)
-            # タイマー開始
-            start_turn_timer(room_code, current_player.sid)
-    else:
-        emit('error', {'message': 'Invalid room code or room is full'}, room=request.sid)
+    if not player_name or not room_code:
+        await sio.emit('error', {'message': 'Player name and room code are required'}, room=sid)
+        return
 
-@socketio.on('join_random')
-def handle_join_random(data):
+    room = rooms_dict.get(room_code)
+    if not room:
+        await sio.emit('error', {'message': 'Invalid room code'}, room=sid)
+        return
+
+    if room.is_full():
+        await sio.emit('error', {'message': 'Room is full'}, room=sid)
+        return
+
+    player = Player(sid, player_name)
+    room.add_player(player)
+    sio.enter_room(sid, room_code)
+    await sio.emit('room_joined', {'room_code': room_code}, room=sid)
+
+    if room.is_full():
+        room.start_game()
+        await sio.emit('game_started', room=room_code)
+        current_player = room.game.get_current_player()
+        await sio.emit('turn', {'player_id': current_player.sid}, room=room_code)
+        await start_turn_timer(room_code, current_player.sid)
+
+@sio.event
+async def join_random(sid, data):
     player_name = data.get('player_name')
+    if not player_name:
+        await sio.emit('error', {'message': 'Player name is required'}, room=sid)
+        return
+
     # 空いている部屋を探す
     for room_code, room in rooms_dict.items():
         if not room.is_full() and not room.game.started:
-            player = Player(request.sid, player_name)
+            player = Player(sid, player_name)
             room.add_player(player)
-            join_room(room_code)
-            emit('room_joined', {'room_code': room_code}, room=request.sid)
-            # 全員が揃ったらゲームを開始
+            sio.enter_room(sid, room_code)
+            await sio.emit('room_joined', {'room_code': room_code}, room=sid)
+
             if room.is_full():
                 room.start_game()
-                socketio.emit('game_started', room=room_code)
-                # 開始時に最初のプレイヤーのターンを設定
+                await sio.emit('game_started', room=room_code)
                 current_player = room.game.get_current_player()
-                socketio.emit('turn', {'player_id': current_player.sid}, room=room_code)
-                # タイマー開始
-                start_turn_timer(room_code, current_player.sid)
+                await sio.emit('turn', {'player_id': current_player.sid}, room=room_code)
+                await start_turn_timer(room_code, current_player.sid)
             return
+
     # 空いている部屋がなければ新しい部屋を作成
     room_code = generate_room_code()
-    new_room = Room(room_code)
-    rooms_dict[room_code] = new_room
-    player = Player(request.sid, player_name)
-    new_room.add_player(player)
-    join_room(room_code)
-    emit('room_created', {'room_code': room_code}, room=request.sid)
+    with lock:
+        new_room = Room(room_code)
+        rooms_dict[room_code] = new_room
 
-@socketio.on('action')
-def handle_action(data):
+    player = Player(sid, player_name)
+    new_room.add_player(player)
+    sio.enter_room(sid, room_code)
+    await sio.emit('room_created', {'room_code': room_code}, room=sid)
+    await sio.emit('room_joined', {'room_code': room_code}, room=sid)
+
+@sio.event
+async def action(sid, data):
     room_code = data.get('room_code')
     action = data.get('action')
+    if not room_code or not action:
+        await sio.emit('error', {'message': 'Room code and action are required'}, room=sid)
+        return
+
     room = rooms_dict.get(room_code)
     if not room or not room.game.started:
-        emit('error', {'message': 'Game not started or invalid room'}, room=request.sid)
+        await sio.emit('error', {'message': 'Game not started or invalid room'}, room=sid)
         return
-    game = room.game
-    player = room.get_player(request.sid)
-    if game.current_player != player:
-        emit('error', {'message': 'Not your turn'}, room=request.sid)
-        return
-    # 假设处理动作的逻辑
-    if action in ['ron', 'tsumo', 'reach', 'naki']:
-        game.process_action(action, player)
-        socketio.emit('game_state', game.get_state(), room=room_code)
-        # 移到下一个玩家
-        next_player = game.next_turn()
-        socketio.emit('turn', {'player_id': next_player.sid}, room=room_code)
-        # 重置タイマー
-        start_turn_timer(room_code, next_player.sid)
-    else:
-        emit('error', {'message': 'Invalid action'}, room=request.sid)
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    # プレイヤーが切断した場合の処理
+    game = room.game
+    player = room.get_player(sid)
+    if not player:
+        await sio.emit('error', {'message': 'Player not found in room'}, room=sid)
+        return
+
+    if game.current_player != player:
+        await sio.emit('error', {'message': 'Not your turn'}, room=sid)
+        return
+
+    if action not in ['ron', 'tsumo', 'reach', 'naki']:
+        await sio.emit('error', {'message': 'Invalid action'}, room=sid)
+        return
+
+    game.process_action(action, player)
+    await sio.emit('game_state', game.get_state(), room=room_code)
+
+    # 次のプレイヤーにターンを移動
+    next_player = game.next_turn()
+    await sio.emit('turn', {'player_id': next_player.sid}, room=room_code)
+    await start_turn_timer(room_code, next_player.sid)
+
+@sio.event
+async def player_left(sid):
+    # プレイヤーが退出した場合の処理
     for room_code, room in list(rooms_dict.items()):
-        player = room.get_player(request.sid)
+        player = room.get_player(sid)
         if player:
             room.remove_player(player)
-            leave_room(room_code)
-            socketio.emit('player_left', {'player_id': request.sid}, room=room_code)
-            # ゲームを終了するか、他のプレイヤーに通知
+            sio.leave_room(sid, room_code)
+            await sio.emit('player_left', {'player_id': sid}, room=room_code)
             if len(room.players) < 2 and room.game.started:
-                socketio.emit('game_ended', {'message': 'Not enough players'}, room=room_code)
+                await sio.emit('game_ended', {'message': 'Not enough players'}, room=room_code)
                 room.end_game()
             if room.is_empty():
                 del rooms_dict[room_code]
             break
 
-def start_turn_timer(room_code, player_sid):
+# タイマー管理の開始
+async def start_turn_timer(room_code, player_sid):
     room = rooms_dict.get(room_code)
     if not room:
         return
@@ -138,28 +204,16 @@ def start_turn_timer(room_code, player_sid):
     if not player:
         return
 
-    def timer():
-        if game.timer_thread_active:
-            return  # 既にタイマーが動作中
-        game.timer_thread_active = True
-        while game.started and game.current_player.sid == player_sid:
-            remaining = game.get_remaining_time()
-            if remaining <= 0:
-                # タイムオーバー、ツモ切り
-                game.process_action('tsumo', player)
-                socketio.emit('game_state', game.get_state(), room=room_code)
-                # 次のプレイヤーへ
-                next_player = game.next_turn()
-                socketio.emit('turn', {'player_id': next_player.sid}, room=room_code)
-                start_turn_timer(room_code, next_player.sid)
-                break
-            else:
-                # 毎秒更新
-                socketio.sleep(1)
-                game.decrement_time()
-        game.timer_thread_active = False
-
-    socketio.start_background_task(timer)
-
-if __name__ == '__main__':
-    socketio.run(app, debug=True)
+    while game.started and game.current_player.sid == player_sid:
+        await sio.sleep(1)
+        game.decrement_time(player)
+        await sio.emit('game_state', game.get_state(), room=room_code)
+        if player.remaining_time <= 0:
+            # タイムオーバー、ツモ切り
+            game.process_action('tsumo', player)
+            await sio.emit('game_state', game.get_state(), room=room_code)
+            # 次のプレイヤーへ
+            next_player = game.next_turn()
+            await sio.emit('turn', {'player_id': next_player.sid}, room=room_code)
+            await start_turn_timer(room_code, next_player.sid)
+            break
