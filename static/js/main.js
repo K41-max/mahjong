@@ -37,7 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
             alert('名前と部屋コードを入力してください');
             return;
         }
-        socket.emit('join_room', { player_name: playerName, room_code: roomCode });
+        socket.emit('join_room_event', { player_name: playerName, room_code: roomCode });
     });
 
     // ランダム参加
@@ -122,9 +122,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // プレイヤー情報を更新
     function updatePlayersUI(players = []) {
         if (!players.length) {
-            // 取得済みのゲーム状態からプレイヤーを取得
-            // ここでは簡略化のため再度サーバーから状態を取得する必要があるかもしれません
-            // ここでは仮に空とします
+            // ゲーム状態からプレイヤー情報を取得するロジックを追加可能
             return;
         }
         playersDiv.innerHTML = '<h3>プレイヤー一覧:</h3>';
@@ -133,7 +131,7 @@ document.addEventListener('DOMContentLoaded', () => {
             playerDiv.classList.add('player');
             playerDiv.innerText = `${player.name} - 残り時間: ${player.remaining_time}秒`;
             playersDiv.appendChild(playerDiv);
-            // 更新された残り時間を表示
+            // 自分の残り時間を表示
             if (player.sid === socket.id) {
                 remainingTimeSpan.innerText = player.remaining_time;
                 clearInterval(timerInterval);
