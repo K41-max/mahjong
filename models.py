@@ -6,12 +6,14 @@ class Player:
         self.name = name
         self.remaining_time = 25  # 初期持ち時間（20秒 + 5秒）
 
+    def reset_time(self):
+        self.remaining_time = 25  # 基本ルールに基づく
+
 class Game:
     def __init__(self):
         self.players = []  # Playerオブジェクトのリスト
         self.current_player_index = 0
         self.started = False
-        self.timer_thread_active = False
 
     def add_player(self, player):
         if len(self.players) < 4:
@@ -27,7 +29,7 @@ class Game:
         self.started = True
         self.current_player_index = 0
         for player in self.players:
-            player.remaining_time = 25  # 初期持ち時間を設定
+            player.reset_time()  # 各プレイヤーの持ち時間をリセット
 
     def get_current_player(self):
         if self.players:
@@ -39,11 +41,8 @@ class Game:
         return self.get_current_player()
 
     def process_action(self, action, player):
-        # アクションに基づいてゲーム状態を更新するロジックを実装
-        # この例ではシンプルに次のターンに移動するだけ
-        # 実際の麻雀のロジックをここに追加
-        if action in ['ron', 'tsumo', 'reach', 'naki']:
-            # アクション処理の例
+        # アクションに基づいてゲーム状態を更新
+        if action in ['tsumo', 'ron', 'reach', 'naki']:
             print(f'Player {player.name} performed {action}')
             # タイマーをリセットまたは更新
             self.update_timer(player, action)
@@ -59,7 +58,7 @@ class Game:
             # 鳴きの場合、追加のロジック
             pass
         # タイマーをリセット
-        player.remaining_time = 25
+        player.reset_time()
 
     def get_state(self):
         return {
@@ -68,14 +67,13 @@ class Game:
             'started': self.started
         }
 
-    def decrement_time(self):
-        current_player = self.get_current_player()
-        if current_player:
-            current_player.remaining_time -= 1
-            # 最低時間以下になった場合
-            if current_player.remaining_time <= 0:
-                # タイムオーバーの処理（自動ツモ切り）
-                self.process_action('tsumo', current_player)
+    def decrement_time(self, player):
+        player.remaining_time -= 1
+        if player.remaining_time < 20:
+            player.remaining_time += 5  # 残り時間が20秒を切ったら+5秒
+        if player.remaining_time <= 0:
+            # タイムオーバーの処理（自動ツモ切り）
+            self.process_action('tsumo', player)
 
 class Room:
     def __init__(self, code):
