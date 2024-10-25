@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>オンライン4人麻雀ゲーム</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <script src="https://cdn.socket.io/4.4.1/socket.io.min.js"
+            integrity="sha384-fVw2H3MZW6jrcpFqE3YhKCOpvfPGNqve6GtQK4R5gYJkz6yUB+EOSw1rccuHJ4I5"
+            crossorigin="anonymous"></script>
+</head>
+<body>
+    <div class="lobby">
+        <h1>オンライン4人麻雀ゲーム</h1>
+        <div class="create-room">
+            <h2>部屋を作成</h2>
+            <input type="text" id="create-player-name" placeholder="あなたの名前">
+            <button id="create-room-btn">作成</button>
+        </div>
+        <div class="join-room">
+            <h2>部屋に参加</h2>
+            <input type="text" id="join-player-name" placeholder="あなたの名前">
+            <input type="text" id="join-room-code" placeholder="部屋コード">
+            <button id="join-room-btn">参加</button>
+        </div>
+        <div class="join-random">
+            <h2>ランダムに参加</h2>
+            <input type="text" id="random-player-name" placeholder="あなたの名前">
+            <button id="join-random-btn">ランダム参加</button>
+        </div>
+    </div>
+
+    <div class="game" style="display: none;">
+        <h2>部屋コード: <span id="room-code"></span></h2>
+        <div id="status">ゲーム開始待機中...</div>
+        <div id="players">
+            <!-- プレイヤー情報を表示 -->
+        </div>
+        <div id="buttons">
+            <!-- 動的にボタンを表示 -->
+        </div>
+        <div id="timer">
+            <span>残り時間: </span><span id="remaining-time">--</span> 秒
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
