@@ -1,4 +1,4 @@
-1fastapi==0.95.1
-2python-socketio[asyncio]==5.7.2
-3uvicorn[standard]==0.22.0
-4eventlet==0.33.0
+fastapi==0.95.1
+python-socketio[asyncio]==5.7.2
+uvicorn[standard]==0.22.0
+eventlet==0.33.0
